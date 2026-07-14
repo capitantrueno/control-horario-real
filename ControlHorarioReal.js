@@ -1,12 +1,30 @@
 // ==UserScript==
 // @name         Control horario correcto
 // @namespace    http://tampermonkey.net/
-// @version      0.8
+// @version      0.9
 // @description  Debajo de las horas normales añado las horas teniendo en cuenta la jornada intensiva
 // @author       Juanma
 // @match        https://intranet.iti.upv.es/iti-hrm/controlhorario/
 // @grant        none
 // ==/UserScript==
+
+/* global $ */
+
+
+/*** Configuración parametrizable ***/
+const CONFIG = {
+  // Período estival (meses 0-11, donde 0=Enero)
+	// 15 de junio
+	// 11 de septiembre
+  periodoEstival: {
+    inicio: { mes: 5, dia: 15 },
+    fin: { mes: 8, dia: 11 }
+  },
+  // Jornada normal (horas/día)
+  jornadaNormalHoras: 7.5,
+  // Límite diario de descuento del cerdito (minutos)
+  limiteDescuentoCerditoMinutos: 30
+};
 
 
 /*** Utils ***/
@@ -19,24 +37,9 @@ function getSegundosFromHoraString(horaString) {
 	const h = +horaString.match(/(\d+):/)[1];
 	const m = +horaString.match(/:(\d+)/)[1];
 
-	const d1 = new Date(2019, 1, 1, 0, 0);
-	const d2 = new Date(2019, 1, 1, h, m);
-
 	const signo = horaString.indexOf('-') >= 0 ? -1 : 1;
 
-	return (d2.getTime() - d1.getTime()) / 1000 * signo;
-}
-
-function getHoraHtmlFromSegundos2(segundos, conColor, conSigno) {
-	const negativo = segundos < 0;
-	if (negativo) segundos *= -1;
-	const h = parseInt(segundos / 3600);
-	let m = parseInt((segundos % 3600) / 60);
-	if (m < 10) m = "0" + m;
-	let horaString = (negativo ? '-' : '+') + h + ':' + m;
-	const colorStyle = conColor ? ' style="color: ' + (negativo ? 'red' : 'green') + ';"' : '';
-	horaString = conSigno ? horaString : horaString.replace('+', '').replace('-', '');
-	return '<span' + colorStyle + '>' + horaString + '</span>';
+	return (h * 3600 + m * 60) * signo;
 }
 
 function getHoraHtmlFromSegundos(segundos, conColor, conSigno, mostrarSegundos) {
@@ -65,77 +68,84 @@ function getHoraHtmlFromSegundos(segundos, conColor, conSigno, mostrarSegundos) 
 
 /*** Web scraping - recolectando datos ***/
 
-function getCabecerasDOM() {
-	return $('h3.no-margins');
+let tarjetasCache = null;
+
+function getTarjetas() {
+	if (!tarjetasCache) {
+		tarjetasCache = {
+			horasMes: $('#widget-wrapper .ibox').first(),
+			alFinalDelDia: $('#today_help').closest('.ibox'),
+			diasDelMes: $('#month_help').closest('.ibox'),
+			disponibleFinDeMes: $('#month_end_help').closest('.ibox'),
+			saldoIntensiva: $('.saldo-intensiva').closest('.ibox')
+		};
+	}
+	return tarjetasCache;
+}
+
+function getH3sDeTarjeta(tarjeta) {
+	return tarjeta.find('.ibox-content h3.no-margins');
 }
 
 function getHorasEstipuladasEnSegundos() {
-	const horasEstipuladasHtml = $(getCabecerasDOM()[1]).html();
+	const horasEstipuladasHtml = getH3sDeTarjeta(getTarjetas().horasMes).eq(1).html();
 	const horasEstipuladas = getHoraStringFromHtml(horasEstipuladasHtml);
 	return getSegundosFromHoraString(horasEstipuladas);
 }
 
 function getHorasEstipuladasAlFinalDelDiaEnSegundos() {
-	const horasEstipuladasFinalDelDiaHtml = $(getCabecerasDOM()[2]).html();
+	const horasEstipuladasFinalDelDiaHtml = getH3sDeTarjeta(getTarjetas().alFinalDelDia).eq(0).html();
 	const horasEstipuladasFinalDelDia = getHoraStringFromHtml(horasEstipuladasFinalDelDiaHtml);
 	return getSegundosFromHoraString(horasEstipuladasFinalDelDia);
 }
 
 function getDiferenciaEnSegundos() {
-	const horaFinalDiaHtml = $(getCabecerasDOM()[3]).html();
+	const horaFinalDiaHtml = getH3sDeTarjeta(getTarjetas().alFinalDelDia).eq(1).html();
 	const horaFinalDia = getHoraStringFromHtml(horaFinalDiaHtml);
 	return getSegundosFromHoraString(horaFinalDia);
 }
 
 function getDiasLaborablesRestantes() {
-	return +$(getCabecerasDOM()[7]).html().trim();
+	return +getH3sDeTarjeta(getTarjetas().disponibleFinDeMes).eq(0).html().trim();
 }
 
 function getHorasAlDiaHastaFinDeMesEnSegundos() {
-	const horasAlDiaHtml = $(getCabecerasDOM()[9]).html().trim();
+	const horasAlDiaHtml = getH3sDeTarjeta(getTarjetas().disponibleFinDeMes).eq(2).html().trim();
     if (horasAlDiaHtml == '-') return '-';
 	const horasAlDia = getHoraStringFromHtml(horasAlDiaHtml);
 	return getSegundosFromHoraString(horasAlDia);
 }
 
 function getSaldoCerditoEnSegundos() {
-	const horasSaldoCerditoHtml = $(getCabecerasDOM()[10]).html();
+	const horasSaldoCerditoHtml = getH3sDeTarjeta(getTarjetas().saldoIntensiva).eq(0).html();
 	const horasSaldoCerdito = getHoraStringFromHtml(horasSaldoCerditoHtml);
 	return getSegundosFromHoraString(horasSaldoCerdito);
 }
 
-function getSegundosConsumidosCerdito(saldoCerditoEnSegundos, numDiasTrabajados, descuentoSegundosCerditoAlDia) {
-	let segundosConsumidosCerdito = numDiasTrabajados * descuentoSegundosCerditoAlDia;
-	if (segundosConsumidosCerdito > saldoCerditoEnSegundos) {
-		segundosConsumidosCerdito = saldoCerditoEnSegundos;
-	}
-	return segundosConsumidosCerdito;
-}
-
 function setHorasEstipuladas(htmlHorasEstipuladas) {
-	$(getCabecerasDOM()[1]).html(htmlHorasEstipuladas);
+	getH3sDeTarjeta(getTarjetas().horasMes).eq(1).html(htmlHorasEstipuladas);
 }
 
 function setHoraEstipuladaAlFinalDelDiaCorrecta(htmlHorasEstipuladasAlFinalDelDia) {
-	$(getCabecerasDOM()[2]).html(htmlHorasEstipuladasAlFinalDelDia);
+	getH3sDeTarjeta(getTarjetas().alFinalDelDia).eq(0).html(htmlHorasEstipuladasAlFinalDelDia);
 }
 
 function setHoraDiferenciaCorrecta(htmlDiferenciaReal) {
-	$(getCabecerasDOM()[3]).html(htmlDiferenciaReal);
+	getH3sDeTarjeta(getTarjetas().alFinalDelDia).eq(1).html(htmlDiferenciaReal);
 }
 
 function setHorasAlDia(htmlHorasAlDia) {
-	$(getCabecerasDOM()[9]).html(htmlHorasAlDia);
+	getH3sDeTarjeta(getTarjetas().disponibleFinDeMes).eq(2).html(htmlHorasAlDia);
 }
 
 function setHoraSaldo(htmlHoraSaldo) {
-	$(getCabecerasDOM()[10]).html(htmlHoraSaldo);
+	getH3sDeTarjeta(getTarjetas().saldoIntensiva).eq(0).html(htmlHoraSaldo);
 }
 
 function setAclaracion(descuentoSegundosCerditoAlDia, segundosXDia) {
 	const descuentoHorasCerditoAlDia = getHoraHtmlFromSegundos(descuentoSegundosCerditoAlDia, false, false, true);
 	const horasXDia = getHoraHtmlFromSegundos(segundosXDia, false, false);
-	$($('.row.nopadding.widgets')[0]).after(`
+	$('#widget-wrapper').after(`
 		<div class="row nopadding widgets">
 			<div class="col-md-12" style="padding-right: 7px;">
 				<div class="ibox float-e-margins">
@@ -149,6 +159,9 @@ function setAclaracion(descuentoSegundosCerditoAlDia, segundosXDia) {
 					<div class="col-xs-12">
 						<h3 class="no-margins">
 							Cada día se descuentan <strong>${descuentoHorasCerditoAlDia}</strong> horas del cerdito, por lo tanto debes trabajar <strong>${horasXDia}</strong> horas al día
+						</h3>
+						<h3 class="no-margins" style="margin-top: 10px;">
+							El segundo valor de "Saldo Intensiva" indica cuánto llevas consumido de más respecto a ese objetivo diario acumulado (o <strong>+0:00</strong> si vas igual o por delante)
 						</h3>
 					</div>
 					</div>
@@ -166,11 +179,25 @@ function setAclaracion(descuentoSegundosCerditoAlDia, segundosXDia) {
 
 function esEpocaDeJornadaIntensiva() {
 	const hoy = new Date();
-	return [6, 7].includes(hoy.getMonth());
+	const mesActual = hoy.getMonth();
+	const diaActual = hoy.getDate();
+
+	const inicio = CONFIG.periodoEstival.inicio;
+	const fin = CONFIG.periodoEstival.fin;
+
+	const fechaActual = mesActual * 100 + diaActual;
+	const fechaInicio = inicio.mes * 100 + inicio.dia;
+	const fechaFin = fin.mes * 100 + fin.dia;
+
+	return fechaActual >= fechaInicio && fechaActual <= fechaFin;
+}
+
+function getDiasLaborablesTotalesDelMes() {
+	return +getH3sDeTarjeta(getTarjetas().diasDelMes).eq(0).html().trim();
 }
 
 function getDiasLaborables(horasEstipuladasEnSegundos) {
-	return horasEstipuladasEnSegundos / (7.5 * 3600);
+	return horasEstipuladasEnSegundos / (CONFIG.jornadaNormalHoras * 3600);
 }
 
 function getSegundosARestarParaJornadaIntensiva(diasLaborables, saldoCerditoEnSegundos) {
@@ -211,22 +238,25 @@ function getHtmlHoraSaldo(saldoCerditoEnSegundos, segundosConsumidosCerdito) {
 /*** ----------------------------------------------- ***/
 
 function main() {
-	// Datos extraidos
+	if (!esEpocaDeJornadaIntensiva()) return;
+
 	const horasEstipuladasEnSegundos = getHorasEstipuladasEnSegundos();
 	const horasEstipuladasAlFinalDelDiaEnSegundos = getHorasEstipuladasAlFinalDelDiaEnSegundos();
 	const diferenciaEnSegundos = getDiferenciaEnSegundos();
 	const diasLaborablesRestantes = getDiasLaborablesRestantes();
 	const saldoCerditoEnSegundos = getSaldoCerditoEnSegundos();
 
-	// Datos calculados
+	const diasLaborablesTotales = getDiasLaborablesTotalesDelMes();
 	const diasLaborables = getDiasLaborables(horasEstipuladasEnSegundos);
 	const segundosARestarParaJornadaIntensiva = getSegundosARestarParaJornadaIntensiva(diasLaborables, saldoCerditoEnSegundos);
-	const diasTrabajados = diasLaborables - diasLaborablesRestantes;
-	const segundosEstipiladosEnJornadaIntensiva = horasEstipuladasEnSegundos - segundosARestarParaJornadaIntensiva; // Dato modificado
+	const diasTrabajados = diasLaborablesTotales - diasLaborablesRestantes;
+	const segundosEstipiladosEnJornadaIntensiva = horasEstipuladasEnSegundos - segundosARestarParaJornadaIntensiva;
 	const descuentoSegundosCerditoAlDia = segundosARestarParaJornadaIntensiva / diasLaborables;
 	const segundosXDia = segundosEstipiladosEnJornadaIntensiva / diasLaborables;
-	const segundosConsumidosCerdito = getSegundosConsumidosCerdito(saldoCerditoEnSegundos, diasTrabajados, descuentoSegundosCerditoAlDia); // Dato modificado
-	const diferenciaRealEnSegundos = diferenciaEnSegundos + segundosConsumidosCerdito; // Dato modificado
+	const horasRealizadasHoy = horasEstipuladasAlFinalDelDiaEnSegundos + diferenciaEnSegundos;
+	const segundosEstipiladosEnJornadaIntensivaAlFinalDelDia = diasTrabajados * segundosXDia;
+	const diferenciaRealEnSegundos = horasRealizadasHoy - segundosEstipiladosEnJornadaIntensivaAlFinalDelDia;
+	const segundosConsumidosCerdito = Math.max(0, -diferenciaRealEnSegundos);
 
 	// HTML's modificados
 	const htmlHorasEstipuladas = getHtmlHorasEstipuladas(horasEstipuladasEnSegundos, segundosEstipiladosEnJornadaIntensiva);
@@ -235,7 +265,6 @@ function main() {
 	const htmlHorasAlDia = getHtmlHorasAlDia(segundosXDia, diasLaborablesRestantes, diferenciaRealEnSegundos, diferenciaEnSegundos);
 	const htmlHorasSaldo = getHtmlHoraSaldo(saldoCerditoEnSegundos, segundosConsumidosCerdito);
 
-	// Seteamos los HTML's
 	setHorasEstipuladas(htmlHorasEstipuladas);
 	setHoraEstipuladaAlFinalDelDiaCorrecta(htmlHorasEstipuladasAlFinalDelDia);
 	setHoraDiferenciaCorrecta(htmlDiferenciaReal);
@@ -246,7 +275,5 @@ function main() {
 
 (function () {
 	'use strict';
-	if (esEpocaDeJornadaIntensiva()) {
-		main();
-	}
+	main();
 })();
